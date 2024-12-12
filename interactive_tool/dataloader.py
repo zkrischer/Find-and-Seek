@@ -18,20 +18,46 @@ class InteractiveDataLoader:
               (You do not need to create the file, this is done automatically.)
     """
     def __init__(self, config):
+        """
+        Initialize the InteractiveDataLoader with the given config.
+
+        :param config: The configuration to use.
+        """
         self.config = config
         self.dataset_path = config.dataset_scenes
         self.user_point_type = config.point_type
         self.scene_names = []
+
+        # Iterate over all directories in the dataset path
         for scene_dir in sorted(os.listdir(self.dataset_path)):
             scene_dir_path = os.path.join(self.dataset_path, scene_dir)
+
+            # Check if the directory is a scene directory (starts with "scene_")
             dir_name_split = scene_dir.split("_")
             if os.path.isdir(scene_dir_path) and dir_name_split[0] == "scene":
                 self.scene_names.append(os.path.splitext("_".join(dir_name_split[1::]))[0])
+
+        # Initialize the current scene index
         self.__clear_curr_status()
         self.__index = 0
+
+        # Load the first scene
         self.load_scene(0)
     
     def __clear_curr_status(self):
+        """
+        Resets the current scene status.
+
+        Resets the following attributes to their initial state:
+            - scene_object_names: a list of strings containing the names of the objects in the current scene
+            - scene_object_semantics: a list of strings containing the semantics of the objects in the current scene
+            - scene_groundtruth_object_names: a list of strings containing the names of the groundtruth objects in the current scene
+            - scene_groundtruth_object_masks: a list of lists containing the masks of the groundtruth objects in the current scene
+            - scene_iou: a pandas dataframe containing the iou between the groundtruth objects and the user defined objects in the current scene
+            - scene_groundtruth_iou_per_object: a list of lists containing the iou between each groundtruth object and the user defined objects in the current scene
+            - scene_3dpoints: a 3d point cloud or mesh representing the current scene
+            - point_type: a string indicating the type of the 3d points (either 'mesh' or 'pointcloud')
+        """
         self.scene_object_names = []
         self.scene_object_semantics = []
         self.scene_groundtruth_object_names = []
@@ -49,7 +75,12 @@ class InteractiveDataLoader:
         return self.__index
 
     def load_scene(self, idx):
-        """given the scene name, returns the scene name, 3d points, list of object names"""
+        """
+        Given the scene name, returns the scene name, 3d points, list of object names
+
+        :param idx: The index of the scene to load
+        :return: The scene name, the 3d points, the list of object names
+        """
         # clear current lists
         name = self.scene_names[idx]
         self.__clear_curr_status()
@@ -67,8 +98,8 @@ class InteractiveDataLoader:
         os.makedirs(self.exp_folder, exist_ok = True)
         os.makedirs(self.mask_folder, exist_ok = True)
         os.makedirs(self.click_folder, exist_ok = True)
-
-
+        
+        # load groundtruth labels
         if not os.path.exists(os.path.join(scene_dir, 'label.ply')):
             self.labels_full_ori = None
         else:
@@ -99,35 +130,80 @@ class InteractiveDataLoader:
 
         
     def get_object_semantic(self, name):
+        """
+        Given an object name, returns the object's semantic segmentation mask.
+
+        :param name: The name of the object
+        :return: The object's semantic segmentation mask
+        """
+        # get the index of the object in the list of object names
         obj_idx = self.scene_object_names.index(self.blank_to_underscore(name))
+        # copy the object's semantic segmentation mask
         obj_semantic = self.scene_object_semantics[obj_idx].copy()
+        # return the object's semantic segmentation mask
         return obj_semantic
     
     def add_object(self, object_name):
-        """given an object name, creates a new file for the object mask, returns True if successful, else False"""
+        """
+        Adds a new object to the current scene.
+
+        This method takes an object name, converts it to an underscore format, and checks if it already exists in the current
+        scene. If not, it creates a new semantic mask for the object and appends it to the list of scene objects.
+
+        :param object_name: The name of the object to add.
+        """
+        # Convert the object name to underscore format
         object_name_underscore = self.blank_to_underscore(object_name)
+
+        # Check if the object already exists in the scene
         if object_name_underscore in self.scene_object_names:
             return
-        # update class variables
-        shape = np.shape(np.asarray(self.scene_3dpoints.points if self.point_type == "pointcloud" else self.scene_3dpoints.vertices)[:, 0])
-        self.scene_object_semantics.append(np.zeros(shape, dtype=np.ubyte))
-        self.scene_object_names.append(object_name_underscore)
 
-        return
+        # Determine the shape of the semantic mask based on the point type
+        shape = np.shape(np.asarray(self.scene_3dpoints.points if self.point_type == "pointcloud" else self.scene_3dpoints.vertices)[:, 0])
+
+        # Create a new semantic mask with the determined shape and add it to the semantics list
+        self.scene_object_semantics.append(np.zeros(shape, dtype=np.ubyte))
+
+        # Append the new object's name to the list of object names
+        self.scene_object_names.append(object_name_underscore)
     
     def update_object(self, object_name, semantic, num_new_clicks):
-        """given an object name and the object's mask, overwrites the existing object mask"""
+        """
+        Given an object name and the object's mask, overwrites the existing object mask.
+
+        :param object_name: The name of the object to update
+        :param semantic: The new object mask
+        :param num_new_clicks: The number of new clicks that were made to update the object mask
+        :return:
+        """
+        # Convert the object name to underscore format
         object_name_underscore = self.blank_to_underscore(object_name)
+        # Get the index of the object in the list of object names
         obj_idx = self.scene_object_names.index(object_name_underscore)
+        # Verify that the new semantic mask has the same shape as the existing one
         assert(self.scene_object_semantics[obj_idx].shape == semantic.shape)
+        # Overwrite the existing object mask with the new one
         self.scene_object_semantics[obj_idx] = semantic.copy()
 
     def get_occupied_points_idx_except_curr(self, curr_object_name):
-        """returns mask for 'occupied' points belonging to at least one object"""
+        """
+        Returns a boolean mask indicating 'occupied' points that belong 
+        to at least one object, excluding the current object.
+
+        :param curr_object_name: The name of the current object to exclude
+        :return: A boolean mask where True indicates the point is occupied by other objects
+        """
+        # Convert the current object name to underscore format and find its index
         obj_idx = self.scene_object_names.index(self.blank_to_underscore(curr_object_name))
+        
+        # Create a copy of the semantic masks and remove the current object's mask
         other_objects = self.scene_object_semantics.copy()
         other_objects.pop(obj_idx)
+        
+        # Create a mask that is True for points occupied by any of the other objects
         mask = np.logical_or.reduce(np.ma.masked_equal(other_objects, 1).mask)
+        
         return mask
 
     def __iter__(self):

@@ -161,36 +161,68 @@ class Agile3d(nn.Module):
         return pos_encodings_pcd
 
     def forward_backbone(self, x, raw_coordinates=None):
+        """
+        Runs the backbone of the network to extract features from the input point cloud
+
+        Args:
+            x: Input point cloud
+            raw_coordinates: Input coordinates
+
+        Returns:
+            pcd_features: Extracted features
+            aux: Auxiliary information
+            coordinates: Coordinates of the input point cloud
+            pos_encodings_pcd: Positional encodings of the input point cloud
+        """
         pcd_features, aux = self.backbone(x)
 
         with torch.no_grad():
+            # convert coordinates to sparse tensor
             coordinates = me.SparseTensor(features=raw_coordinates,
                                           coordinate_manager=aux[-1].coordinate_manager,
                                           coordinate_map_key=aux[-1].coordinate_map_key,
                                           device=aux[-1].device)
+            # get coordinates of the input point cloud at each level
             coords = [coordinates]
             for _ in reversed(range(len(aux)-1)):
                 coords.append(self.pooling(coords[-1]))
 
+            # reverse the order of the coordinates
             coords.reverse()
 
+        # get positional encodings of the input point cloud
         pos_encodings_pcd = self.get_pos_encs(coords)
 
+        # squeeze the features to the correct shape
         pcd_features = self.lin_squeeze_head(pcd_features)
 
         return pcd_features, aux, coordinates, pos_encodings_pcd
 
     def forward_mask(self, pcd_features, aux, coordinates, pos_encodings_pcd, click_idx=None, click_time_idx=None):
+        """
+        Forward pass of the mask module.
 
+        Args:
+            pcd_features: Features of the input point cloud
+            aux: Auxiliary information
+            coordinates: Coordinates of the input point cloud
+            pos_encodings_pcd: Positional encodings of the input point cloud
+            click_idx: Indices of the clicked points
+            click_time_idx: Indices of the clicked points in time
+
+        Returns:
+            predictions_mask: Predicted masks
+        """
         batch_size = pcd_features.C[:,0].max() + 1
 
         predictions_mask = [[] for i in range(batch_size)]
+        attention_mask = [[] for i in range(batch_size)]
 
         bg_learn_queries = self.bg_query_feat.weight.unsqueeze(0).repeat(batch_size, 1, 1)
         bg_learn_query_pos = self.bg_query_pos.weight.unsqueeze(0).repeat(batch_size, 1, 1)
 
         for b in range(batch_size):
-
+            # Get the minimum and maximum coordinates of the current batch
             if coordinates.F.is_cuda:
                 mins = coordinates.decomposed_features[b].min(dim=0)[0].unsqueeze(0)
                 maxs = coordinates.decomposed_features[b].max(dim=0)[0].unsqueeze(0)
@@ -198,33 +230,39 @@ class Agile3d(nn.Module):
                 mins = coordinates.F.min(dim=0)[0].unsqueeze(0)
                 maxs = coordinates.F.max(dim=0)[0].unsqueeze(0)
 
-
+            # Get the indices of the clicked points and the time indices
             click_idx_sample = click_idx[b]
             click_time_idx_sample = click_time_idx[b]
 
+            # Get the indices of the background points
             bg_click_idx = click_idx_sample['0']
 
+            # Get the number of foreground objects
             fg_obj_num = len(click_idx_sample.keys()) - 1
 
-            
+            # Get the number of foreground queries
             fg_query_num_split = [len(click_idx_sample[str(i)]) for i in range(1, fg_obj_num+1)]
             fg_query_num = sum(fg_query_num_split)
 
+            # Get the coordinates of the foreground points
             if coordinates.F.is_cuda:
                 fg_clicks_coords = torch.vstack([coordinates.decomposed_features[b][click_idx_sample[str(i)], :]
-                                        for i in range(1,fg_obj_num+1)]).unsqueeze(0)
+                                                for i in range(1,fg_obj_num+1)]).unsqueeze(0)
             else:
                 fg_clicks_coords = torch.vstack([coordinates.F[click_idx_sample[str(i)], :]
-                                        for i in range(1,fg_obj_num+1)]).unsqueeze(0)
+                                                for i in range(1,fg_obj_num+1)]).unsqueeze(0)
 
+            # Get the positional encodings of the foreground points
             fg_query_pos = self.pos_enc(fg_clicks_coords.float(),
                                      input_range=[mins, maxs]
                                      )
 
+            # Get the time indices of the foreground points
             fg_clicks_time_idx = list(itertools.chain.from_iterable([click_time_idx_sample[str(i)] for i in range(1,fg_obj_num+1)]))
             fg_query_time = self.time_encode[fg_clicks_time_idx].T.unsqueeze(0).to(fg_query_pos.device)
             fg_query_pos = fg_query_pos + fg_query_time
 
+            # If there are background points, get their coordinates and positional encodings
             if len(bg_click_idx)!=0:
                 if coordinates.F.is_cuda:
                     bg_click_coords = coordinates.decomposed_features[b][bg_click_idx].unsqueeze(0)
@@ -236,16 +274,20 @@ class Agile3d(nn.Module):
                 bg_query_time = self.time_encode[click_time_idx_sample['0']].T.unsqueeze(0).to(bg_query_pos.device)
                 bg_query_pos = bg_query_pos + bg_query_time
 
+                # Concatenate the background queries with the learned background queries
                 bg_query_pos = torch.cat([bg_learn_query_pos[b].T.unsqueeze(0), bg_query_pos],dim=-1)
             else:
+                # If there are no background points, use the learned background queries
                 bg_query_pos = bg_learn_query_pos[b].T.unsqueeze(0)
 
+            # Permute the foreground and background queries
             fg_query_pos = fg_query_pos.permute((2, 0, 1))[:,0,:] # [num_queries, 128]
             bg_query_pos = bg_query_pos.permute((2, 0, 1))[:,0,:] # [num_queries, 128]
 
+            # Get the number of background queries
             bg_query_num = bg_query_pos.shape[0]
-            # with torch.no_grad():
 
+            # Get the features of the foreground and background points
             if pcd_features.F.is_cuda:
                 fg_queries = torch.vstack([pcd_features.decomposed_features[b][click_idx_sample[str(i)], :]
                                            for i in range(1,fg_obj_num+1)])
@@ -254,15 +296,18 @@ class Agile3d(nn.Module):
                                            for i in range(1,fg_obj_num+1)])
 
             if len(bg_click_idx)!=0:
-                # with torch.no_grad():
+                # If there are background points, get their features
                 if pcd_features.F.is_cuda:
                     bg_queries = pcd_features.decomposed_features[b][bg_click_idx,:]
                 else:
                     bg_queries = pcd_features.F[bg_click_idx,:]
+                # Concatenate the background features with the learned background features
                 bg_queries = torch.cat([bg_learn_queries[b], bg_queries], dim=0)
             else:
+                # If there are no background points, use the learned background features
                 bg_queries = bg_learn_queries[b]
 
+            # Get the features of the input point cloud
             if pcd_features.F.is_cuda:
                 src_pcd = pcd_features.decomposed_features[b]
             else:
@@ -274,12 +319,14 @@ class Agile3d(nn.Module):
                 if self.shared_decoder:
                     decoder_counter = 0
                 for i, hlevel in enumerate(self.hlevels):
-
+                    # Get the positional encodings of the input point cloud
                     pos_enc = pos_encodings_pcd[hlevel][0][b]# [num_points, 128]
 
+                    # If this is the first refinement step, set the attention mask to None
                     if refine_time == 0:
                         attn_mask = None
 
+                    # Run the click-to-scene attention
                     output = self.c2s_attention[decoder_counter][i](
                         torch.cat([fg_queries, bg_queries],dim=0), # [num_queries, 128]
                         src_pcd, # [num_points, 128]
@@ -289,7 +336,7 @@ class Agile3d(nn.Module):
                         query_pos=torch.cat([fg_query_pos, bg_query_pos], dim=0) # [num_queries, 128]
                     ) # [num_queries, 128]
 
-
+                    # Run the click-to-click attention
                     output = self.c2c_attention[decoder_counter][i](
                         output, # [num_queries, 128]
                         tgt_mask=None,
@@ -297,11 +344,12 @@ class Agile3d(nn.Module):
                         query_pos=torch.cat([fg_query_pos, bg_query_pos], dim=0) # [num_queries, 128]
                     ) # [num_queries, 128]
 
-                    # FFN
+                    # Run the FFN
                     queries = self.ffn_attention[decoder_counter][i](
                         output
                     ) # [num_queries, 128]
 
+                    # Run the scene-to-click attention
                     src_pcd = self.s2c_attention[decoder_counter][i](
                         src_pcd,
                         queries, # [num_queries, 128]
@@ -311,8 +359,10 @@ class Agile3d(nn.Module):
                         query_pos=pos_enc # [num_points, 128]
                     ) # [num_points, 128]
 
+                    # Split the output into foreground and background queries
                     fg_queries, bg_queries = queries.split([fg_query_num, bg_query_num], 0)
 
+                    # Run the mask module
                     outputs_mask, attn_mask = self.mask_module(
                                                         fg_queries,
                                                         bg_queries,
@@ -320,54 +370,79 @@ class Agile3d(nn.Module):
                                                         ret_attn_mask=True,
                                                         fg_query_num_split=fg_query_num_split)
 
+                    # Append the predicted mask to the list of predictions
                     predictions_mask[b].append(outputs_mask)
+                    attention_mask[b].append(attn_mask)
 
+                    # Increment the refinement time
                     refine_time += 1
 
+        # Transpose the list of predictions
         predictions_mask = [list(i) for i in zip(*predictions_mask)]
-        
-        
-        
-        out= {
-            'pred_masks': predictions_mask[-1],
-            'backbone_features': pcd_features
-        }
 
-        if self.aux:
-            out['aux_outputs'] = self._set_aux_loss(predictions_mask)
-
-        return out
+        # Not sure if I want to transpose these things as well, but I'm going to in this case
+        attention_mask = [list(i) for i in zip(*attention_mask)]
+        # Return the predicted masks
+        return predictions_mask
 
 
     def mask_module(self, fg_query_feat, bg_query_feat, mask_features, ret_attn_mask=True,
                                 fg_query_num_split=None):
+        """
+        This function takes in the foreground and background query features, the mask features, and returns the predicted
+        masks and attention masks.
 
+        Args:
+        - fg_query_feat: The foreground query features of shape [num_fg_queries, 128]
+        - bg_query_feat: The background query features of shape [num_bg_queries, 128]
+        - mask_features: The mask features of shape [num_points, 128]
+        - ret_attn_mask: Whether to return the attention mask. Default is True.
+        - fg_query_num_split: The number of foreground queries for each object. Default is None.
+
+        Returns:
+        - output_masks: The predicted mask of shape [num_points, num_objects+1]
+        - attn_mask: The attention mask of shape [num_queries, num_points]
+        """
+
+        # Normalize the foreground query features
         fg_query_feat = self.decoder_norm(fg_query_feat)
+        # Project the foreground query features to the mask embedding space
         fg_mask_embed = self.mask_embed_head(fg_query_feat)
 
+        # Compute the dot product between the mask features and the foreground mask embeddings
         fg_prods = mask_features @ fg_mask_embed.T
+
+        # Split the foreground masks into separate objects
         fg_prods = fg_prods.split(fg_query_num_split, dim=1)
 
+        # Compute the maximum of the foreground masks for each object
         fg_masks = []
         for fg_prod in fg_prods:
             fg_masks.append(fg_prod.max(dim=-1, keepdim=True)[0])
 
+        # Concatenate the foreground masks
         fg_masks = torch.cat(fg_masks, dim=-1)
-        
+
+        # Normalize the background query features
         bg_query_feat = self.decoder_norm(bg_query_feat)
+        # Project the background query features to the mask embedding space
         bg_mask_embed = self.mask_embed_head(bg_query_feat)
+        # Compute the dot product between the mask features and the background mask embeddings
         bg_masks = (mask_features @ bg_mask_embed.T).max(dim=-1, keepdim=True)[0]
 
+        # Concatenate the background masks with the foreground masks
         output_masks = torch.cat([bg_masks, fg_masks], dim=-1)
 
         if ret_attn_mask:
-
+            # Compute the labels for the predicted masks
             output_labels = output_masks.argmax(1)
 
+            # Compute the attention mask for the background queries
             bg_attn_mask = ~(output_labels == 0)
             bg_attn_mask = bg_attn_mask.unsqueeze(0).repeat(bg_query_feat.shape[0], 1)
             bg_attn_mask[torch.where(bg_attn_mask.sum(-1) == bg_attn_mask.shape[-1])] = False
 
+            # Compute the attention mask for the foreground queries
             fg_attn_mask = []
             for fg_obj_id in range(1, fg_masks.shape[-1]+1):
                 fg_obj_mask = ~(output_labels == fg_obj_id)
@@ -375,8 +450,8 @@ class Agile3d(nn.Module):
                 fg_obj_mask[torch.where(fg_obj_mask.sum(-1) == fg_obj_mask.shape[-1])] = False
                 fg_attn_mask.append(fg_obj_mask)
 
+            # Concatenate the attention masks for the foreground and background queries
             fg_attn_mask = torch.cat(fg_attn_mask, dim=0)
-
             attn_mask = torch.cat([fg_attn_mask, bg_attn_mask], dim=0)
 
             return output_masks, attn_mask

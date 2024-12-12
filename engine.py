@@ -25,14 +25,13 @@ from evaluation.evaluator_MO import EvaluatorMO
 
 def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     data_loader: Iterable, optimizer: torch.optim.Optimizer,
-                    device: torch.device, epoch: int, train_total_iter: int, max_norm: float = 0):
+                    device: torch.device, epoch: int, train_total_iter: int, max_norm: float = 0, accumulation_steps=1):
     model.train()
     criterion.train()
     metric_logger = utils.MetricLogger(delimiter="  ")
     header = 'Epoch: [{}]'.format(epoch)
 
     print_freq = 10
-    accum_iter = 20
 
     for i, batched_inputs in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
 
@@ -53,65 +52,89 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
         pcd_features, aux, coordinates, pos_encodings_pcd = model.forward_backbone(data, raw_coordinates=raw_coords)
 
         #########  1. random sample obj number and obj index #########
-        for idx in range(batch_idx.max()+1):
+        for idx in range(batch_idx.max() + 1):
+            # Create a mask for the current sample in the batch
             sample_mask = batch_idx == idx
             sample_labels = labels[idx]
             sample_raw_coords = raw_coords[sample_mask]
-            valid_obj_idxs = torch.unique(sample_labels)
-            valid_obj_idxs = valid_obj_idxs[valid_obj_idxs!=-1]
 
+            # Find unique object indices in the sample labels, excluding -1
+            valid_obj_idxs = torch.unique(sample_labels)
+            valid_obj_idxs = valid_obj_idxs[valid_obj_idxs != -1]
+
+            # Determine the maximum number of objects present in the sample
             max_num_obj = len(valid_obj_idxs)
 
-            num_obj = np.random.randint(1, min(10, max_num_obj)+1)
+            # Randomly select a number of objects to sample, at least 1 and at most the lesser of 10 or the number of valid objects
+            num_obj = np.random.randint(1, min(10, max_num_obj) + 1)
             obj_idxs = valid_obj_idxs[torch.randperm(max_num_obj)[:num_obj]]
+
+            # Initialize a new tensor for the sampled labels with zeros
             sample_labels_new = torch.zeros(sample_labels.shape[0], device=device)
 
+            # Loop through each selected object index and update the sampled labels and click indices
             for i, obj_id in enumerate(obj_idxs):
                 obj_mask = sample_labels == obj_id
-                sample_labels_new[obj_mask] = i+1
+                sample_labels_new[obj_mask] = i + 1
 
-                click_idx[idx][str(i+1)] = []
+                # Initialize click index for the current object
+                click_idx[idx][str(i + 1)] = []
 
+            # Initialize click index for the background
             click_idx[idx]['0'] = []
+
+            # Append the newly sampled labels to the labels_new list
             labels_new.append(sample_labels_new)
 
+        # Create a deep copy of click_idx for click_time_idx
         click_time_idx = copy.deepcopy(click_idx)
-        
         #########  2. pre interactive sampling  #########
 
         current_num_iter = 0
         num_forward_iters = random.randint(0, 19)
 
         with torch.no_grad():
+            # Set the model to evaluation mode
             model.eval()
             eval_model = model
+
             while current_num_iter <= num_forward_iters:
                 if current_num_iter == 0:
+                    # Initialize predictions as zero tensors for the first iteration
                     pred = [torch.zeros(l.shape).to(device) for l in labels]
                 else:
-                    outputs = eval_model.forward_mask(pcd_features, aux, coordinates, pos_encodings_pcd, 
+                    # Forward pass through the model to get predictions
+                    outputs = eval_model.forward_mask(pcd_features, aux, coordinates, pos_encodings_pcd,
                                                       click_idx=click_idx, click_time_idx=click_time_idx)
+                    
+                    print('----------------------------')
+                    print(type(outputs))
                     pred_logits = outputs['pred_masks']
                     pred = [p.argmax(-1) for p in pred_logits]
 
-                for idx in range(batch_idx.max()+1):
+                # Iterate over each sample in the batch
+                for idx in range(batch_idx.max() + 1):
                     sample_mask = batch_idx == idx
                     sample_pred = pred[idx]
 
                     if current_num_iter != 0:
-                        # update prediction with sparse gt
+                        # Update prediction with sparse ground truth by setting predicted values at click indices
                         for obj_id, cids in click_idx[idx].items():
                             sample_pred[cids] = int(obj_id)
 
                     sample_labels = labels_new[idx]
                     sample_raw_coords = raw_coords[sample_mask]
 
-                    new_clicks, new_clicks_num, new_click_pos, new_click_time = get_simulated_clicks(sample_pred, sample_labels, sample_raw_coords, current_num_iter, training=True)
+                    # Get simulated clicks based on the current predictions and labels
+                    new_clicks, new_clicks_num, new_click_pos, new_click_time = get_simulated_clicks(
+                        sample_pred, sample_labels, sample_raw_coords, current_num_iter, training=True)
 
-                    ### add new clicks ###
+                    # Add new clicks to the click index and click time index
                     if new_clicks is not None:
-                        click_idx[idx], click_time_idx[idx] = extend_clicks(click_idx[idx], click_time_idx[idx], new_clicks, new_click_time)
+                        click_idx[idx], click_time_idx[idx] = extend_clicks(click_idx[idx], click_time_idx[idx],
+                                                                            new_clicks, new_click_time)
 
+                # Increment the iteration counter
                 current_num_iter += 1
 
 
@@ -126,6 +149,9 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
         loss_dict = criterion(outputs, labels_new, click_weights)
         weight_dict = criterion.weight_dict
         losses = sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict)
+
+        # Adding Gradient accumulation (normalizing the loss)
+        losses = losses / accumulation_steps
 
         loss_dict_reduced = utils.reduce_dict(loss_dict)
         loss_dict_reduced_unscaled = {f'{k}_unscaled': v
@@ -145,32 +171,38 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
 
         optimizer.zero_grad()
         losses.backward()
-        if max_norm > 0:
-            grad_total_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
-        else:
-            grad_total_norm = utils.get_total_grad_norm(model.parameters(), max_norm)
-        optimizer.step()
+
+        # Update optimizer only after accumulating enough steps
+        if (i + 1) % accumulation_steps == 0 or (i + 1) == len(data_loader):
+            if max_norm > 0:
+                grad_total_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
+            else:
+                grad_total_norm = utils.get_total_grad_norm(model.parameters(), max_norm)
+            optimizer.step()
+
+            # Then reset the gradients
+            optimizer.zero_grad()
 
 
-        with torch.no_grad():
-            pred_logits = outputs['pred_masks']
-            pred = [p.argmax(-1) for p in pred_logits]
-            metric_logger.update(mIoU=mean_iou(pred, labels_new))
+            with torch.no_grad():
+                pred_logits = outputs['pred_masks']
+                pred = [p.argmax(-1) for p in pred_logits]
+                metric_logger.update(mIoU=mean_iou(pred, labels_new))
 
-            metric_logger.update(grad_norm=grad_total_norm)
-            metric_logger.update(loss=loss_value, **loss_dict_reduced_scaled, **loss_dict_reduced_unscaled)
-            metric_logger.update(lr=optimizer.param_groups[0]["lr"])
- 
+                metric_logger.update(grad_norm=grad_total_norm)
+                metric_logger.update(loss=loss_value, **loss_dict_reduced_scaled, **loss_dict_reduced_unscaled)
+                metric_logger.update(lr=optimizer.param_groups[0]["lr"])
+    
 
-        if ((i + 1) % 100 == 0):
-            wandb.log({
-                "train/loss": metric_logger.meters['loss'].avg,
-                "train/loss_bce": metric_logger.meters['loss_bce'].avg,
-                "train/loss_dice": metric_logger.meters['loss_dice'].avg,
+            if ((i + 1) % 100 == 0):
+                wandb.log({
+                    "train/loss": metric_logger.meters['loss'].avg,
+                    "train/loss_bce": metric_logger.meters['loss_bce'].avg,
+                    "train/loss_dice": metric_logger.meters['loss_dice'].avg,
 
-                "train/mIoU": metric_logger.meters['mIoU'].avg,
-                "train/total_iter": train_total_iter
-                })
+                    "train/mIoU": metric_logger.meters['mIoU'].avg,
+                    "train/total_iter": train_total_iter
+                    })
 
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()

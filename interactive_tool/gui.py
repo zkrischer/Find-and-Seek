@@ -60,6 +60,7 @@ class InteractiveSegmentationGUI:
         self.model = segmentation_model
         self.app = gui.Application.instance
         self.app.initialize()
+        # This line is what is causing the X error
         self.window = self.app.create_window("AGILE3D", 1400, 700)
         font = self.app.add_font(gui.FontDescription(typeface='sans-serif'))
         self.em = self.window.theme.font_size

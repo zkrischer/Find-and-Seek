@@ -52,6 +52,7 @@ class InterMultiObj3DSegDataset(Dataset):
         colors_full = np.column_stack([point_cloud['R'], point_cloud['G'], point_cloud['B']])/255
         labels_full = point_cloud['label'].astype(np.int32)
 
+        # A randomiser option looks like
         if self.transforms:
             coords_full = self.augment(coords_full)
 
@@ -61,6 +62,7 @@ class InterMultiObj3DSegDataset(Dataset):
         else:
             labels_full_new = labels_full
 
+        # Used to quantize the sparse coordinates and return them in the form of a sparse tensor
         coords_qv, unique_map, inverse_map = ME.utils.sparse_quantize(
             coordinates=coords_full,
             quantization_size=self.quantization_size,

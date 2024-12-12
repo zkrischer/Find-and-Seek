@@ -22,64 +22,67 @@ import wandb
 import os
 
 def get_args_parser():
+    """
+    Creates and returns the argument parser for the AGILE3D model training script.
+
+    Returns:
+        argparse.ArgumentParser: The argument parser with all arguments configured.
+    """
     parser = argparse.ArgumentParser('AGILE3D', add_help=False)
 
-    # dataset
-    parser.add_argument('--dataset_mode', default='multi_obj')
-    parser.add_argument('--scan_folder', default='data/ScanNet/scans', type=str)
-    parser.add_argument('--train_list', default='data/ScanNet/train_list.json', type=str)
-    parser.add_argument('--val_list', default='data/ScanNet/val_list.json', type=str)
-    
+    # Dataset parameters
+    parser.add_argument('--dataset_mode', default='multi_obj', help='Dataset mode, either single_obj or multi_obj')
+    parser.add_argument('--scan_folder', default='data/ScanNet/scans', type=str, help='Path to the scan folder')
+    parser.add_argument('--train_list', default='data/ScanNet/train_list.json', type=str, help='Path to the training list')
+    parser.add_argument('--val_list', default='data/ScanNet/val_list.json', type=str, help='Path to the validation list')
 
-    # model
-    ### 1. backbone
-    parser.add_argument('--dialations', default=[ 1, 1, 1, 1 ], type=list)
-    parser.add_argument('--conv1_kernel_size', default=5, type=int)
-    parser.add_argument('--bn_momentum', default=0.02, type=int)
-    parser.add_argument('--voxel_size', default=0.05, type=float)
+    # Model parameters
+    ## Backbone
+    parser.add_argument('--dialations', default=[1, 1, 1, 1], type=list, help='Dialation rates for the backbone')
+    parser.add_argument('--conv1_kernel_size', default=5, type=int, help='Kernel size for the first convolutional layer')
+    parser.add_argument('--bn_momentum', default=0.02, type=int, help='Batch normalization momentum')
+    parser.add_argument('--voxel_size', default=0.05, type=float, help='Voxel size for point cloud data')
 
-    ### 2. transformer
-    parser.add_argument('--hidden_dim', default=128, type=int)
-    parser.add_argument('--dim_feedforward', default=1024, type=int)
-    parser.add_argument('--num_heads', default=8, type=int)
-    parser.add_argument('--num_decoders', default=3, type=int)
-    parser.add_argument('--num_bg_queries', default=10, type=int, help='number of learnable background queries')
-    parser.add_argument('--dropout', default=0.0, type=float)
-    parser.add_argument('--pre_norm', default=False, type=bool)
-    parser.add_argument('--normalize_pos_enc', default=True, type=bool)
-    parser.add_argument('--positional_encoding_type', default="fourier", type=str)
-    parser.add_argument('--gauss_scale', default=1.0, type=float, help='gauss scale for positional encoding')
-    parser.add_argument('--hlevels', default=[4], type=list)
-    parser.add_argument('--shared_decoder', default=False, type=bool)
+    ## Transformer
+    parser.add_argument('--hidden_dim', default=128, type=int, help='Hidden dimension size for transformer layers')
+    parser.add_argument('--dim_feedforward', default=1024, type=int, help='Feedforward dimension size in transformer')
+    parser.add_argument('--num_heads', default=8, type=int, help='Number of attention heads in the transformer')
+    parser.add_argument('--num_decoders', default=3, type=int, help='Number of decoder layers in the transformer')
+    parser.add_argument('--num_bg_queries', default=10, type=int, help='Number of learnable background queries')
+    parser.add_argument('--dropout', default=0.0, type=float, help='Dropout rate in transformer layers')
+    parser.add_argument('--pre_norm', default=False, type=bool, help='Whether to use pre-norm in transformer layers')
+    parser.add_argument('--normalize_pos_enc', default=True, type=bool, help='Normalize positional encoding')
+    parser.add_argument('--positional_encoding_type', default="fourier", type=str, help='Type of positional encoding to use')
+    parser.add_argument('--gauss_scale', default=1.0, type=float, help='Gauss scale for positional encoding')
+    parser.add_argument('--hlevels', default=[4], type=list, help='Hierarchy levels for feature extraction')
+    parser.add_argument('--shared_decoder', default=False, type=bool, help='Whether to use shared decoder layers')
 
-    # loss
-    parser.add_argument('--losses', default=['bce','dice'], type=list)
-    parser.add_argument('--bce_loss_coef', default=1.0, type=float)
-    parser.add_argument('--dice_loss_coef', default=2.0, type=float)
-    parser.add_argument('--aux', default=True, type=bool)
+    # Loss parameters
+    parser.add_argument('--losses', default=['bce', 'dice'], type=list, help='List of loss functions to use')
+    parser.add_argument('--bce_loss_coef', default=1.0, type=float, help='Coefficient for BCE loss')
+    parser.add_argument('--dice_loss_coef', default=2.0, type=float, help='Coefficient for Dice loss')
+    parser.add_argument('--aux', default=True, type=bool, help='Use auxiliary loss')
 
-    # training
-    parser.add_argument('--lr', default=0.0001, type=float)
-    parser.add_argument('--weight_decay', default=0.0001, type=float)
-    parser.add_argument('--lr_drop', default=[1000], type=int, nargs='+')
-    parser.add_argument('--epochs', default=1100, type=int)
-    parser.add_argument('--val_epochs', default=50, type=int)
-    parser.add_argument('--batch_size', default=5, type=int)
-    parser.add_argument('--val_batch_size', default=1, type=int)
-    parser.add_argument('--clip_max_norm', default=0.1, type=float,
-                        help='gradient clipping max norm')
-    parser.add_argument('--device', default='cuda',
-                        help='device to use for training / testing')
-    parser.add_argument('--seed', default=42, type=int)
-    parser.add_argument('--output_dir', default='output',
-                        help='path where to save, empty for no saving')
-    parser.add_argument('--start_epoch', default=0, type=int, metavar='N',
-                        help='start epoch')
-    parser.add_argument('--num_workers', default=2, type=int)
-    parser.add_argument('--resume', default='', help='resume from checkpoint')
-    parser.add_argument('--max_num_clicks', default=20, help='maximum number of clicks per object on average', type=int)
+    # Training parameters
+    parser.add_argument('--lr', default=0.0001, type=float, help='Learning rate')
+    parser.add_argument('--weight_decay', default=0.0001, type=float, help='Weight decay for optimization')
+    parser.add_argument('--lr_drop', default=[1000], type=int, nargs='+', help='Epochs to drop learning rate')
+    parser.add_argument('--epochs', default=1100, type=int, help='Total number of training epochs')
+    parser.add_argument('--val_epochs', default=50, type=int, help='Validation frequency in epochs')
+    parser.add_argument('--batch_size', default=5, type=int, help='Training batch size')
+    parser.add_argument('--val_batch_size', default=1, type=int, help='Validation batch size')
+    parser.add_argument('--clip_max_norm', default=0.1, type=float, help='Max gradient norm for clipping')
+    parser.add_argument('--device', default='cuda', help='Device to use for training/testing')
+    parser.add_argument('--seed', default=42, type=int, help='Random seed for reproducibility')
+    parser.add_argument('--output_dir', default='output', help='Output directory for saving results')
+    parser.add_argument('--start_epoch', default=0, type=int, metavar='N', help='Start epoch number')
+    parser.add_argument('--num_workers', default=2, type=int, help='Number of workers for data loading')
+    parser.add_argument('--resume', default='', help='Path to resume training from checkpoint')
+    parser.add_argument('--max_num_clicks', default=20, type=int, help='Maximum number of clicks per object on average')
+    parser.add_argument('--job_name', default='test', type=str, help='Name of the job for logging')
 
-    parser.add_argument('--job_name', default='test', type=str)
+    # Add support for gradient accumulation
+    parser.add_argument('--accumulation_steps', default=1, type=int, help='Steps for gradient accumulation')
 
     return parser
 
@@ -92,6 +95,9 @@ def main(args):
     wandb.run.name = args.run_id
     
     device = torch.device(args.device)
+
+    # Something to fiddle with for speed
+    torch.set_float32_matmul_precision('medium')
 
     # fix the seed for reproducibility
     seed = args.seed + utils.get_rank()
@@ -180,11 +186,11 @@ def main(args):
 
     train_total_iter = 0
     start_time = time.time()
-
+    
     for epoch in range(args.start_epoch, args.epochs):
 
         train_stats, train_total_iter = train_one_epoch(
-            model, criterion, data_loader_train, optimizer, device, epoch, train_total_iter, args.clip_max_norm)
+            model, criterion, data_loader_train, optimizer, device, epoch, train_total_iter, args.clip_max_norm, args.accumulation_steps)
         
         lr_scheduler.step()
         if args.output_dir:
